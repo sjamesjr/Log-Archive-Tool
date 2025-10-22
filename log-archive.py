@@ -28,15 +28,15 @@ def parse_args():
     return p.parse_args()
 
 
-def find_files(root, older_than_days=None)
+def find_files(root, older_than_days=None):
     threshold = None
-    if older_than_days is not None
+    if older_than_days is not None:
         threshold = time.time() - older_than_days * 86400
     files = []
-    for dirpath, _, filenames in os.walk(root)
+    for dirpath, _, filenames in os.walk(root):
         for f in filenames:
             fp = os.path.join(dirpath, f)
-            if not os.path.isfile(fp)
+            if not os.path.isfile(fp):
                 continue
             if threshold and os.path.getmtime(fp) > threshold:
                 continue
@@ -62,3 +62,88 @@ def write_archive(files, src_root, dest_dir, archive_name, dry_run=False):
             for f in files:
                 arcname = os.path.relpath(f, start=src_root)
                 tar.add(f,arcname=arcname)
+        final_path = os.path.join(dest_dir, archive_name)
+        os.replace(tmp_path, final_path) # atomic rename
+        return final_path
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+def append_history(logfile, entry):
+    with open(logfile, "a", encoding="utf-8") as fh:
+        fh.write(entry +"\n")
+
+
+def delete_files(files, dry_run=False):
+    for f in files:
+        if dry_run:
+            print("[dry-run] would remove:", f)
+        else:
+            os.remove(f)
+
+
+def cleanup_archives(dest_dir, pattern="log_archive_", retain_days=None, dry_run=False):
+    if retain_days is None:
+        return
+    cutoff = time.time() - retain_days * 86400
+    for name in os.listdir(dest_dir):
+        if not name.startswith(pattern) or not name.endswith(".tar.gz"):
+            continue
+        fp = os.path.join(dest_dir, name)
+        if os.path.getmtime(fp) < cutoff:
+            if dry_run:
+                print("[dry-run] would delete archive:", fp)
+            else:
+                os.remove(fp)
+
+
+def ensure_dir(path, dry_run=False):
+    if not os.path.exists(path):
+        if dry_run:
+            print("[dry-run] would create dir:", path)
+        else:
+            os.makedirs(path, exist_ok=True)
+
+
+def main():
+    args = parse_args()
+    src = os.path.abspath(args.log_dir)
+    if not os.path.isdir(src):
+        print("Source directory does not exist:", src, file=sys.stderr)
+        sys.exit(2)
+    dest = args.dest or os.path.join(src, "archives")
+    logfile = args.logfile or os.path.join(dest, "archive_history.log")
+
+    ensure_dir(dest, dry_run=args.dry_run)
+
+    files = find_files(src, older_than_days=args.days)
+    # avoid archiving the archives dir itself
+    files = [f for f in files if not os.path.commonpath([f, dest]) == os.path.abspath(dest)]
+
+    if not files:
+        print("No files matched for archiving. Exiting.")
+        sys.exit(0)
+
+    archive_name = make_archive_name()
+    print("Archiving", len(files), "files to", archive_name)
+    archive_path = write_archive(files, src, dest, archive_name, dry_run=args.dry_run)
+    if archive_path:
+        size = 0
+        if not args.dry_run:
+            size = os.path.getsize(archive_path)
+        entry = f"{datetime.now().isoformat()} | {archive_name} | files={len(files)} | size={size} | src={src}"
+        if args.dry_run:
+            print("[dry-run] would append history:", entry)
+        else:
+            append_history(logfile, entry)
+        if args.move:
+            print("Removing original files...")
+            delete_files(files, dry_run=args.dry_run)
+        if args.retain:
+            cleanup_archives(dest, retain_days=args.retain, dry_run=args.dry_run)
+    print("Done.")
+
+
+if __name__ == "__main__":
+    main()
